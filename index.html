@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="el">
+<head>
+  <meta charset="utf-8" />
+  <title>Puzzle (mobile friendly)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+  <style>
+    :root{
+      --board-size: 480px; /* θα ρυθμιστεί από JS ανάλογα με την οθόνη */
+      --gap: 6px;
+    }
+    *{box-sizing:border-box}
+    body{
+      font-family: Arial, Helvetica, sans-serif;
+      display:flex; flex-direction:column; align-items:center;
+      gap:14px; padding:16px; background:#f6f7fb;
+    }
+    .controls{display:flex; flex-wrap:wrap; gap:10px; align-items:center; justify-content:center}
+    .controls button{ padding:8px 12px; border-radius:10px; border:0; background:#4caf50; color:#fff; cursor:pointer}
+    .controls button.secondary{ background:#1976d2}
+    .controls select, .controls input[type=file]{ padding:6px }
+    .wrap{ display:flex; gap:18px; align-items:flex-start; width:100%; justify-content:center; flex-wrap:wrap }
+    .col{ display:flex; flex-direction:column; align-items:center }
+    .title{ font-weight:700; margin:6px 0 }
+    .grid{ display:grid; gap:var(--gap); background:#eef0f6; padding:var(--gap); border-radius:12px; box-shadow:0 6px 20px rgba(0,0,0,.06) }
+    #board, #pieces{ width:var(--board-size); touch-action: none; }
+    /* slots */
+    .slot{ background:#e4e7ef; border:1px dashed #b9c0d4; border-radius:8px; }
+    /* pieces */
+    .piece{
+      border:1px solid #c7ccda; border-radius:8px;
+      background-repeat:no-repeat; background-position:0 0;
+      touch-action: none; cursor:grab; user-select:none;
+    }
+    /* “αιωρούμενο” κομμάτι στο touch drag */
+    .drag-ghost{
+      position:fixed; z-index:9999; pointer-events:none; opacity:.9;
+      transform: translate(-50%, -50%);
+      box-shadow:0 10px 30px rgba(0,0,0,.2);
+    }
+    /* Popup νίκης */
+    .popup{ position:fixed; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.45) }
+    .popup .card{ background:#fff; padding:22px 28px; border-radius:12px; text-align:center; box-shadow:0 12px 40px rgba(0,0,0,.25) }
+    .popup .card button{ margin-top:10px }
+    /* Mobile tweaks */
+    @media (max-width: 600px){
+      :root{ --gap: 5px; }
+    }
+  </style>
+</head>
+<body>
+  <h2>🧩 Puzzle (mobile-friendly)</h2>
+
+  <div class="controls">
+    <label for="size">Μέγεθος:</label>
+    <select id="size">
+      <option value="3">3×3</option>
+      <option value="4">4×4</option>
+      <option value="5">5×5</option>
+    </select>
+    <button id="startBtn">Έναρξη</button>
+    <button id="restartBtn" class="secondary">Ξαναπαίξε</button>
+    <button id="randBtn">Τυχαία εικόνα</button>
+    <input type="file" id="customImg" accept="image/*" />
+  </div>
+
+  <div class="wrap">
+    <div class="col">
+      <div class="title">🧩 Κομμάτια</div>
+      <div id="pieces" class="grid"></div>
+    </div>
+    <div class="col">
+      <div class="title">🎯 Ταμπλό</div>
+      <div id="board" class="grid"></div>
+    </div>
+  </div>
+
+  <div class="popup" id="popup"><div class="card">
+    <h3>🎉 Συγχαρητήρια! Τα κατάφερες!</h3>
+    <button id="popupRestart">Ξαναπαίξε</button>
+  </div></div>
+
+<script>
+(function(){
+  // ----- στοιχεία DOM
+  var piecesEl = document.getElementById('pieces');
+  var boardEl  = document.getElementById('board');
+  var sizeSel  = document.getElementById('size');
+  var startBtn = document.getElementById('startBtn');
+  var restartBtn = document.getElementById('restartBtn');
+  var randBtn  = document.getElementById('randBtn');
+  var customInput = document.getElementById('customImg');
+  var popup   = document.getElementById('popup');
+  var popupRestart = document.getElementById('popupRestart');
+
+  // ----- κατάσταση
+  var TILE = 100;        // θα προσαρμόζεται από layout()
+  var GRID = 3;
+  var imgUrl = null;
+  var positions = [];    // background offsets για κάθε “σωστό” index
+  var dragged = null;    // για mouse DnD
+  var ghost = null;      // για touch/pointer DnD
+  var draggingPiece = null;
+
+  // ----- helpers
+  function randImg(side){
+    return 'https://picsum.photos/' + side + '/' + side + '?random=' + (Date.now() + Math.floor(Math.random()*9999));
+  }
+  function createPositions(n){
+    var arr = [];
+    for(var r=0;r<n;r++){
+      for(var c=0;c<n;c++){
+        arr.push({r:r,c:c});
+      }
+    }
+    return arr;
+  }
+  function findAncestorByClass(el, className){
+    while(el && el !== document){
+      if(el.classList && el.classList.contains(className)) return el;
+      el = el.parentNode;
+    }
+    return null;
+  }
+  function preload(url, ok, fail){
+    var i = new Image();
+    i.onload = function(){ ok(); };
+    i.onerror = function(){ fail(); };
+    i.src = url;
+  }
+
+  // ----- responsive layout: ορίζει board-size & TILE ανάλογα με οθόνη
+  function computeBoardSize(){
+    // κρατάμε το ταμπλό μέχρι ~ 92vw στο κινητό και 560px max
+    var maxPx = 560;
+    var w = Math.min(window.innerWidth - 32, maxPx);
+    // σε πολύ μικρά κινητά, λίγο μικρότερο για να χωρέσουν και τα δύο grids
+    if (window.innerWidth < 420) { w = window.innerWidth - 24; }
+    document.documentElement.style.setProperty('--board-size', w + 'px');
+    return w;
+  }
+  function layout(){
+    var boardSize = computeBoardSize();
+    TILE = Math.floor((boardSize - (GRID+1)*getGap()) / GRID); // approx tile size
+    // ρύθμιση CSS πλεγμάτων
+    piecesEl.style.gridTemplateColumns = repeatCss(GRID, TILE);
+    boardEl .style.gridTemplateColumns = repeatCss(GRID, TILE);
+    boardEl .style.gridTemplateRows    = repeatCss(GRID, TILE);
+    // ενημέρωση υπαρχόντων slots & pieces (πλάτη/ύψη & background)
+    var slots = boardEl.children;
+    for (var i=0;i<slots.length;i++){
+      slots[i].style.width = TILE+'px';
+      slots[i].style.height= TILE+'px';
+    }
+    var pcs = piecesEl.querySelectorAll('.piece');
+    for (var j=0;j<pcs.length;j++){
+      var p = pcs[j];
+      p.style.width = TILE+'px';
+      p.style.height= TILE+'px';
+      // υπολογισμός σωστής θέσης από dataset.correct
+      var idx = parseInt(p.dataset.correct,10) || 0;
+      var rc = indexToRC(idx, GRID);
+      p.style.backgroundSize = (GRID*TILE) + 'px ' + (GRID*TILE) + 'px';
+      p.style.backgroundPosition = (-rc.c*TILE) + 'px ' + (-rc.r*TILE) + 'px';
+    }
+  }
+  function getGap(){
+    // από το CSS var(--gap)
+    var cs = getComputedStyle(document.documentElement);
+    var gap = cs.getPropertyValue('--gap').trim();
+    if (gap.endsWith('px')) return parseInt(gap,10);
+    return 6;
+  }
+  function repeatCss(n, tile){
+    return 'repeat(' + n + ', ' + tile + 'px)';
+  }
+  function indexToRC(idx, n){ return { r: Math.floor(idx/n), c: idx % n }; }
+
+  // ----- δημιουργία παιχνιδιού
+  function buildBoardAndPieces(){
+    // καθάρισμα
+    piecesEl.innerHTML = ''; boardEl.innerHTML = ''; popup.style.display='none';
+
+    // φτιάχνουμε slots
+    for (var i=0;i<positions.length;i++){
+      var s = document.createElement('div');
+      s.className = 'slot';
+      s.dataset.index = i;
+      boardEl.appendChild(s);
+    }
+
+    // φτιάχνουμε κομμάτια (ανακατεμένα)
+    var shuffled = positions.slice().sort(function(){ return Math.random()-0.5; });
+    for (var k=0;k<shuffled.length;k++){
+      var rc = shuffled[k];
+      var piece = document.createElement('div');
+      piece.className = 'piece';
+      piece.style.backgroundImage = 'url("' + imgUrl + '")';
+      piece.dataset.correct = (rc.r*GRID + rc.c);
+      // listeners για mouse & pointer
+      piece.draggable = true; // για desktop browsers
+      piece.addEventListener('pointerdown', onPointerDown, {passive:false});
+      piecesEl.appendChild(piece);
+    }
+
+    // για mouse DnD
+    attachMouseDnD();
+    // εφαρμογή διαστάσεων/positions
+    layout();
+  }
+
+  function initGame(){
+    GRID = parseInt(sizeSel.value,10) || 3;
+    positions = createPositions(GRID);
+    // αν δεν έχει δοθεί custom εικόνα, χρησιμοποίησε τυχαία
+    if (!imgUrl) imgUrl = randImg(GRID*100);
+    preload(imgUrl, function(){ buildBoardAndPieces(); }, function(){
+      imgUrl = randImg(GRID*100);
+      buildBoardAndPieces();
+    });
+  }
+
+  // ----- Mouse Drag & Drop (desktop)
+  function attachMouseDnD(){
+    document.addEventListener('dragstart', function(e){
+      var t = e.target || e.srcElement;
+      if (t && t.classList && t.classList.contains('piece')) dragged = t;
+    });
+    document.addEventListener('dragover', function(e){ if(e.preventDefault) e.preventDefault(); return false; });
+    document.addEventListener('drop', function(e){
+      if(e.preventDefault) e.preventDefault();
+      if(!dragged) return false;
+      var target = e.target || e.srcElement;
+      var slot = findAncestorByClass(target,'slot');
+      var pool = findAncestorByClass(target,'grid'); // pieces grid
+      if (slot){
+        if (slot.firstChild) piecesEl.appendChild(slot.firstChild);
+        slot.appendChild(dragged);
+        checkWin();
+      } else if (pool && pool.id==='pieces'){
+        piecesEl.appendChild(dragged);
+      }
+      dragged = null;
+      return false;
+    });
+  }
+
+  // ----- Touch/Pointer Drag (mobile)
+  function onPointerDown(e){
+    // μόνο για αφής/πένα/ποντίκι χωρίς native drag (π.χ. iOS)
+    if (e.pointerType === 'mouse') return; // αφήνουμε το native drag για mouse
+    e.preventDefault();
+    draggingPiece = e.currentTarget;
+
+    // δημιουργία ghost
+    ghost = draggingPiece.cloneNode(true);
+    ghost.classList.add('drag-ghost');
+    document.body.appendChild(ghost);
+
+    moveGhost(e.clientX, e.clientY);
+    window.addEventListener('pointermove', onPointerMove, {passive:false});
+    window.addEventListener('pointerup', onPointerUp, {passive:false});
+  }
+  function onPointerMove(e){
+    if (!ghost) return;
+    e.preventDefault();
+    moveGhost(e.clientX, e.clientY);
+  }
+  function onPointerUp(e){
+    if (!ghost) return;
+    e.preventDefault();
+    // βρίσκουμε στόχο κάτω από το δάχτυλο
+    var el = document.elementFromPoint(e.clientX, e.clientY);
+    var slot = findAncestorByClass(el,'slot');
+    var pool = findAncestorByClass(el,'grid');
+
+    if (slot){
+      if (slot.firstChild) piecesEl.appendChild(slot.firstChild);
+      slot.appendChild(draggingPiece);
+      checkWin();
+    } else if (pool && pool.id==='pieces'){
+      piecesEl.appendChild(draggingPiece);
+    }
+    // καθάρισμα
+    document.body.removeChild(ghost);
+    ghost = null; draggingPiece = null;
+    window.removeEventListener('pointermove', onPointerMove);
+    window.removeEventListener('pointerup', onPointerUp);
+  }
+  function moveGhost(x,y){
+    var s = ghost.style;
+    s.left = x + 'px';
+    s.top  = y + 'px';
+    s.width = draggingPiece.offsetWidth + 'px';
+    s.height= draggingPiece.offsetHeight + 'px';
+    s.backgroundImage = draggingPiece.style.backgroundImage;
+    s.backgroundSize  = draggingPiece.style.backgroundSize;
+    s.backgroundPosition = draggingPiece.style.backgroundPosition;
+    s.borderRadius = '8px';
+    s.border = '1px solid #aaa';
+    ghost.classList.add('piece');
+  }
+
+  // ----- Έλεγχος νίκης
+  function checkWin(){
+    var slots = boardEl.children;
+    for (var i=0;i<slots.length;i++){
+      var s = slots[i];
+      if (!s.firstChild) return;
+      if (s.firstChild.dataset.correct != s.dataset.index) return;
+    }
+    popup.style.display = 'flex';
+  }
+
+  // ----- Χειρισμός controls
+  startBtn.addEventListener('click', function(){ imgUrl = null; initGame(); });
+  restartBtn.addEventListener('click', function(){ imgUrl = randImg(GRID*100); initGame(); });
+  randBtn.addEventListener('click', function(){ imgUrl = randImg(GRID*100); initGame(); });
+  popupRestart.addEventListener('click', function(){ imgUrl = null; initGame(); });
+  customInput.addEventListener('change', function(ev){
+    var file = ev.target.files[0];
+    if(!file) return;
+    var reader = new FileReader();
+    reader.onload = function(e){ imgUrl = e.target.result; initGame(); };
+    reader.readAsDataURL(file);
+  });
+
+  // responsive: ξανα-διατάξουμε στις αλλαγές μεγέθους
+  window.addEventListener('resize', function(){ layout(); });
+
+  // εκκίνηση
+  initGame();
+})();
+</script>
+</body>
+</html>
